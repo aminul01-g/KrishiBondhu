@@ -1,0 +1,25 @@
+fastapi==0.95.2
+uvicorn[standard]==0.22.0
+python-multipart==0.0.6
+requests==2.31.0
+pydantic==1.10.10
+langgraph==0.2.76
+gtts==2.3.1
+openai==1.0.0  # Keep for potential fallback
+boto3==1.28.0
+google-generativeai==0.3.2
+python-dotenv==1.0.0
+aiofiles==23.1.0
+pytest==7.4.0
+
+# DB & migrations
+sqlalchemy==1.4.48
+asyncpg>=0.29.0
+alembic==1.12.0
+psycopg2-binary==2.9.6
+
+# Vision (YOLOv8 ultralytics)
+ultralytics==8.0.134
+
+# Optional helpers
+tqdm==4.66.1
