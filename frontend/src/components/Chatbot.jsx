@@ -16,6 +16,7 @@ export default function Chatbot({ onMessageComplete }) {
   const [selectedImage, setSelectedImage] = useState(null)
   const [imagePreview, setImagePreview] = useState(null)
   const [isPlaying, setIsPlaying] = useState(false)
+  const [isPaused, setIsPaused] = useState(false)
   const ttsAudioRef = useRef(null)
   const messagesEndRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -149,11 +150,21 @@ export default function Chatbot({ onMessageComplete }) {
           const audio = new Audio(ttsUrl)
           ttsAudioRef.current = audio
           setIsPlaying(true)
-          audio.onended = () => setIsPlaying(false)
-          audio.onerror = () => setIsPlaying(false)
+          setIsPaused(false)
+          audio.onended = () => {
+            setIsPlaying(false)
+            setIsPaused(false)
+          }
+          audio.onerror = () => {
+            setIsPlaying(false)
+            setIsPaused(false)
+          }
+          audio.onpause = () => setIsPaused(true)
+          audio.onplay = () => setIsPaused(false)
           audio.play().catch(err => {
             console.error('Audio play error:', err)
             setIsPlaying(false)
+            setIsPaused(false)
           })
         }
       }
@@ -204,12 +215,32 @@ export default function Chatbot({ onMessageComplete }) {
     }
   }
 
+  const toggleTTS = () => {
+    if (ttsAudioRef.current) {
+      if (isPaused || !isPlaying) {
+        // Play or resume
+        ttsAudioRef.current.play().catch(err => {
+          console.error('Audio play error:', err)
+          setIsPlaying(false)
+          setIsPaused(false)
+        })
+        setIsPlaying(true)
+        setIsPaused(false)
+      } else {
+        // Pause
+        ttsAudioRef.current.pause()
+        setIsPaused(true)
+      }
+    }
+  }
+
   const stopTTS = () => {
     if (ttsAudioRef.current) {
       ttsAudioRef.current.pause()
       ttsAudioRef.current.currentTime = 0
       ttsAudioRef.current = null
       setIsPlaying(false)
+      setIsPaused(false)
     }
   }
 
@@ -263,12 +294,17 @@ export default function Chatbot({ onMessageComplete }) {
 
       <div className="chat-input-area">
         {/* TTS Control */}
-        {isPlaying && (
+        {ttsAudioRef.current && (
           <div className="tts-control">
-            <button onClick={stopTTS} className="stop-tts-btn">
-              ⏹ Stop Audio
+            <button onClick={toggleTTS} className="play-pause-tts-btn">
+              {isPaused ? '▶️' : '⏸️'}
             </button>
-            <span className="tts-status">🔊 Playing response...</span>
+            <button onClick={stopTTS} className="stop-tts-btn" title="Stop and reset">
+              ⏹
+            </button>
+            <span className="tts-status">
+              {isPaused ? '⏸️ Paused' : '🔊 Playing response...'}
+            </span>
           </div>
         )}
         {imagePreview && (

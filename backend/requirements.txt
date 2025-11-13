@@ -1,8 +1,8 @@
-fastapi==0.95.2
+fastapi>=0.100.0,<1.0.0
 uvicorn[standard]==0.22.0
 python-multipart==0.0.6
 requests==2.31.0
-pydantic==1.10.10
+pydantic>=2.0.0,<3.0.0
 langgraph==0.2.76
 gtts==2.3.1
 openai==1.0.0  # Keep for potential fallback

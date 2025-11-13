@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.exc import OperationalError
 from app.db import get_db
 from app.models.db_models import Conversation
@@ -42,3 +42,45 @@ async def get_conversations(db: AsyncSession = Depends(get_db)):
         print(f"Database connection error (conversations endpoint): {e}")
         print("Returning empty conversations list - database may not be running")
         return []
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Delete a specific conversation by ID.
+    Gracefully handles database connection errors.
+    """
+    # Check if database connection is available
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        # Check if conversation exists
+        result = await db.execute(
+            select(Conversation).where(Conversation.id == conversation_id)
+        )
+        conversation = result.scalar_one_or_none()
+        
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Delete the conversation
+        await db.execute(
+            delete(Conversation).where(Conversation.id == conversation_id)
+        )
+        await db.commit()
+        
+        print(f"Successfully deleted conversation {conversation_id}")
+        return {"message": "Conversation deleted successfully", "id": conversation_id}
+        
+    except HTTPException:
+        raise
+    except (OperationalError, ConnectionRefusedError) as e:
+        await db.rollback()
+        print(f"Database connection error (delete conversation): {e}")
+        raise HTTPException(status_code=503, detail="Database not available")
+    except Exception as e:
+        await db.rollback()
+        print(f"Error deleting conversation: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error deleting conversation: {str(e)}")

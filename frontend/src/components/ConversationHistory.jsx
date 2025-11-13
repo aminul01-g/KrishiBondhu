@@ -1,6 +1,9 @@
-import React from 'react'
+import React, { useState } from 'react'
 
-export default function ConversationHistory({ conversations, loading }) {
+const API_BASE = 'http://localhost:8000/api'
+
+export default function ConversationHistory({ conversations, loading, onDelete }) {
+  const [deletingId, setDeletingId] = useState(null)
   if (loading) {
     return (
       <div className="loading-state">
@@ -35,6 +38,34 @@ export default function ConversationHistory({ conversations, loading }) {
     }
   }
 
+  const handleDelete = async (conversationId) => {
+    if (!window.confirm('Are you sure you want to delete this conversation?')) {
+      return
+    }
+
+    setDeletingId(conversationId)
+    try {
+      const response = await fetch(`${API_BASE}/conversations/${conversationId}`, {
+        method: 'DELETE'
+      })
+
+      if (!response.ok) {
+        const error = await response.json()
+        throw new Error(error.detail || 'Failed to delete conversation')
+      }
+
+      // Notify parent to refresh conversations
+      if (onDelete) {
+        onDelete()
+      }
+    } catch (err) {
+      console.error('Error deleting conversation:', err)
+      alert(`Failed to delete conversation: ${err.message}`)
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
   return (
     <div className="conversation-list">
       {conversations.map((conv) => (
@@ -44,11 +75,21 @@ export default function ConversationHistory({ conversations, loading }) {
               <span className="conversation-id">#{conv.id}</span>
               <span className="conversation-date">{formatDate(conv.created_at)}</span>
             </div>
-            {conv.confidence !== null && (
-              <span className="confidence-badge">
-                {(conv.confidence * 100).toFixed(0)}% confidence
-              </span>
-            )}
+            <div className="conversation-actions">
+              {conv.confidence !== null && (
+                <span className="confidence-badge">
+                  {(conv.confidence * 100).toFixed(0)}% confidence
+                </span>
+              )}
+              <button
+                onClick={() => handleDelete(conv.id)}
+                disabled={deletingId === conv.id}
+                className="delete-btn"
+                title="Delete conversation"
+              >
+                {deletingId === conv.id ? '⏳' : '🗑️'}
+              </button>
+            </div>
           </div>
 
           {conv.transcript && (

@@ -53,7 +53,7 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <div className="header-content">
-          <h1>🌾 FarmerAI Assistant</h1>
+          <h1>🌾 KrishiBondhu</h1>
           <p className="subtitle">Your intelligent farming assistant - Ask questions, share images, or chat anytime!</p>
         </div>
       </header>
@@ -146,6 +146,7 @@ export default function App() {
                 <ConversationHistory 
                   conversations={conversations} 
                   loading={loading}
+                  onDelete={fetchConversations}
                 />
               </div>
             </section>
@@ -154,7 +155,7 @@ export default function App() {
       </main>
 
       <footer className="app-footer">
-        <p>FarmerAI - Empowering farmers with AI technology 🌾🤖</p>
+        <p>KrishiBondhu - Empowering farmers with AI technology 🌾🤖</p>
       </footer>
     </div>
   )

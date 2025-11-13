@@ -63,21 +63,36 @@ def transcribe_with_gemini(audio_path: str) -> dict:
             # Default to webm if unknown
             mime_type = "audio/webm"
         
-        # Use Gemini to transcribe the audio - improved for Bengali/Bangla
-        prompt = """You are a professional audio transcription assistant specializing in Bengali (Bangla) and English.
-        
-Your task is to transcribe this audio accurately, preserving the exact words spoken.
+        # Use Gemini to transcribe the audio - improved for Bengali/Bangla with better accuracy
+        prompt = """You are an expert audio transcription assistant specializing in Bengali (Bangla) and English languages, with particular expertise in agricultural terminology.
 
-IMPORTANT INSTRUCTIONS:
-- If the audio is in Bengali/Bangla, transcribe it in Bengali script (বাংলা)
-- If the audio is in English, transcribe it in English
-- Preserve the exact words, pronunciation, and meaning
-- Do NOT translate - only transcribe what you hear
-- Handle regional accents and dialects (especially Bangladeshi Bengali)
-- Return ONLY the transcribed text, no explanations, no additional text
-- Be accurate with agricultural/farming terms in both languages
+CRITICAL TRANSCRIPTION RULES:
+1. LANGUAGE DETECTION:
+   - Listen carefully to identify if the speaker is using Bengali/Bangla or English
+   - Bengali uses the Bengali script (বাংলা) with Unicode range 0980-09FF
+   - If you hear Bengali words, transcribe in Bengali script
+   - If you hear English words, transcribe in English
 
-Transcribe the audio now:"""
+2. ACCURACY REQUIREMENTS:
+   - Transcribe EXACTLY what you hear - word for word
+   - Do NOT translate between languages
+   - Do NOT add words that weren't spoken
+   - Do NOT omit words that were spoken
+   - Preserve the exact pronunciation and meaning
+   - Handle regional accents (especially Bangladeshi Bengali dialect)
+
+3. AGRICULTURAL TERMINOLOGY:
+   - Be precise with crop names: ধান (rice), আলু (potato), টমেটো (tomato), গম (wheat)
+   - Accurately transcribe disease names: রোগ, পোকা, পাতা পোড়া
+   - Preserve technical farming terms in their original language
+
+4. OUTPUT FORMAT:
+   - Return ONLY the transcribed text
+   - No explanations, no additional commentary
+   - No language labels or prefixes
+   - Just the pure transcription
+
+Now transcribe the audio accurately:"""
         
         print("Generating transcription with Gemini...")
         # Pass file directly using Part.from_data
@@ -162,6 +177,46 @@ def call_open_meteo(lat, lon):
     except Exception:
         return {}
 
+def validate_response_language(response_text: str, expected_language: str) -> str:
+    """
+    Validate that the response matches the expected language.
+    If it doesn't, attempt to correct it or return a warning.
+    Returns the (possibly corrected) response text.
+    """
+    if not response_text or not expected_language:
+        return response_text
+    
+    # Detect actual language of response
+    actual_language = detect_language_from_text(response_text)
+    
+    # If languages match, return as-is
+    if actual_language == expected_language:
+        print(f"[DEBUG] Response language validation: PASSED ({expected_language})")
+        return response_text
+    
+    # Languages don't match - log warning
+    print(f"[WARNING] Response language mismatch!")
+    print(f"[WARNING] Expected: {expected_language}, Got: {actual_language}")
+    print(f"[WARNING] Response preview: {response_text[:200]}...")
+    
+    # If response is in wrong language, we could try to regenerate
+    # For now, just log and return - the LLM should have followed instructions
+    # But we'll add a post-processing step to enforce language if needed
+    
+    # Count characters in each language to see if it's mixed
+    bengali_chars = sum(1 for c in response_text if '\u0980' <= c <= '\u09FF')
+    english_chars = sum(1 for c in response_text if c.isalpha() and ord(c) < 128)
+    
+    if expected_language == "bn" and bengali_chars == 0 and english_chars > 0:
+        # Response is in English but should be Bengali
+        print(f"[ERROR] Response is in English but should be in Bengali!")
+        # Could add logic here to request regeneration, but for now just warn
+    elif expected_language == "en" and bengali_chars > 0 and english_chars == 0:
+        # Response is in Bengali but should be English
+        print(f"[ERROR] Response is in Bengali but should be in English!")
+    
+    return response_text
+
 def clean_text_for_tts(text: str) -> str:
     """
     Clean text for TTS by removing markdown, special symbols, and formatting.
@@ -203,7 +258,11 @@ def synthesize_tts(text: str, lang: str="bn") -> str:
     """
     Save TTS mp3 using gTTS and return the filepath.
     Cleans text before TTS to remove markdown and special symbols.
+    Uses UPLOAD_DIR for persistent storage instead of /tmp.
     """
+    from app.api.utils import UPLOAD_DIR
+    from uuid import uuid4
+    
     # Clean text before TTS
     cleaned_text = clean_text_for_tts(text)
     
@@ -211,19 +270,27 @@ def synthesize_tts(text: str, lang: str="bn") -> str:
         print("[WARNING] Text is empty after cleaning, using original")
         cleaned_text = text.strip()
     
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+    # Use UPLOAD_DIR instead of /tmp for persistent storage
+    tts_filename = f"{uuid4().hex}.mp3"
+    tts_path = os.path.join(UPLOAD_DIR, tts_filename)
+    
+    # Ensure UPLOAD_DIR exists
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    
     try:
         tts = gTTS(cleaned_text, lang=lang if lang else "en")
-        tts.save(tmp.name)
+        tts.save(tts_path)
         print(f"[DEBUG] TTS generated: {len(cleaned_text)} characters (cleaned from {len(text)} original)")
-        return tmp.name
+        print(f"[DEBUG] TTS saved to: {tts_path}")
+        return tts_path
     except Exception as e:
         print(f"[ERROR] TTS generation failed: {e}")
         # Try with original text as fallback
         try:
             tts = gTTS(text[:500], lang=lang if lang else "en")  # Limit length
-            tts.save(tmp.name)
-            return tmp.name
+            tts.save(tts_path)
+            print(f"[DEBUG] TTS fallback saved to: {tts_path}")
+            return tts_path
         except Exception as e2:
             print(f"[ERROR] TTS fallback also failed: {e2}")
             raise
@@ -336,41 +403,84 @@ def detect_language_from_text(text: str) -> str:
     """
     Detect language from text input (for chat/text queries).
     Returns "bn" for Bengali, "en" for English.
+    Uses comprehensive detection including Unicode ranges and common words.
     """
     if not text or not text.strip():
         return "en"
     
-    # Check for Bengali characters (Unicode range: 0980-09FF)
-    has_bengali = False
-    for char in text:
-        if '\u0980' <= char <= '\u09FF':  # Bengali Unicode range
-            has_bengali = True
-            break
+    text = text.strip()
     
-    # Also check for common Bengali words/phrases
-    bengali_indicators = ["আমি", "তুমি", "আপনি", "কী", "কেন", "কখন", "কোথায়", "কিভাবে", 
-                          "ধন্যবাদ", "নমস্কার", "ফসল", "ধান", "আলু", "টমেটো", "রোগ", "পোকা"]
+    # Count Bengali vs English characters for more accurate detection
+    bengali_char_count = 0
+    english_char_count = 0
+    
+    for char in text:
+        # Bengali Unicode range: 0980-09FF (includes all Bengali characters)
+        if '\u0980' <= char <= '\u09FF':
+            bengali_char_count += 1
+        # English letters (basic Latin)
+        elif char.isalpha() and ord(char) < 128:
+            english_char_count += 1
+    
+    # Check for common Bengali words/phrases (expanded list)
+    bengali_indicators = [
+        "আমি", "তুমি", "আপনি", "কী", "কেন", "কখন", "কোথায়", "কিভাবে", 
+        "ধন্যবাদ", "নমস্কার", "ফসল", "ধান", "আলু", "টমেটো", "রোগ", "পোকা",
+        "কৃষি", "চাষ", "জমি", "বীজ", "সার", "পানি", "বৃষ্টি", "সূর্য",
+        "কীটনাশক", "ফল", "শাক", "সবজি", "গাছ", "গাছপালা"
+    ]
     has_bengali_words = any(word in text for word in bengali_indicators)
     
-    if has_bengali or has_bengali_words:
-        print(f"[DEBUG] Detected Bengali language from text input")
+    # Decision logic: Bengali if we have Bengali characters OR Bengali words
+    # Also consider ratio if both are present
+    if bengali_char_count > 0:
+        # If we have Bengali characters, it's definitely Bengali
+        print(f"[DEBUG] Detected Bengali language from text input (Bengali chars: {bengali_char_count})")
         return "bn"
+    elif has_bengali_words:
+        # Bengali words detected even without Bengali script (transliterated)
+        print(f"[DEBUG] Detected Bengali language from text input (Bengali words found)")
+        return "bn"
+    elif english_char_count > 0 and bengali_char_count == 0:
+        # Only English characters
+        print(f"[DEBUG] Detected English language from text input (English chars: {english_char_count})")
+        return "en"
     else:
-        print(f"[DEBUG] Detected English language from text input")
+        # Default to English if unclear
+        print(f"[DEBUG] Language unclear, defaulting to English")
         return "en"
 
 def stt_node(state: FarmState):
+    """
+    Speech-to-text node: handles both audio transcription and text input language detection.
+    For text input, detects language. For audio input, transcribes and detects language.
+    """
     # If transcript already exists (from text input), detect language from it
     if state.get("transcript"):
         # Detect language from the transcript text
         detected_lang = detect_language_from_text(state["transcript"])
         print(f"[DEBUG] STT node: Transcript exists, detected language: {detected_lang}")
+        print(f"[DEBUG] STT node: Transcript preview: {state['transcript'][:100]}...")
         return {"transcript": state["transcript"], "language": detected_lang}
+    
     # If no audio path, return empty (will skip to next node)
     if not state.get("audio_path"):
+        print("[DEBUG] STT node: No audio path and no transcript, returning empty")
         return {"transcript": "", "language": "en"}
+    
+    # Transcribe audio using Gemini
+    print(f"[DEBUG] STT node: Transcribing audio from: {state['audio_path']}")
     stt = transcribe_with_gemini(state["audio_path"])
-    return {"transcript": stt["text"], "language": stt.get("language", "en")}
+    transcript = stt.get("text", "").strip()
+    detected_lang = stt.get("language", "en")
+    
+    print(f"[DEBUG] STT node: Transcription complete")
+    print(f"[DEBUG] STT node: Detected language: {detected_lang}")
+    print(f"[DEBUG] STT node: Transcript length: {len(transcript)} characters")
+    if transcript:
+        print(f"[DEBUG] STT node: Transcript preview: {transcript[:100]}...")
+    
+    return {"transcript": transcript, "language": detected_lang}
 
 def intent_node(state: FarmState):
     """
@@ -389,7 +499,7 @@ def intent_node(state: FarmState):
             "crop": None
         }
     
-    system_instruction = """You are an information extraction assistant for FarmAssist.
+    system_instruction = """You are an information extraction assistant for KrishiBondhu.
 Your task is to analyze farmer queries and extract structured information.
 
 Extract and return ONLY valid JSON with these exact keys:
@@ -437,6 +547,11 @@ IMPORTANT:
     updates = {
         "messages": state.get("messages", []) + [{"role":"user", "content": transcript}]
     }
+    # Preserve language from state - don't overwrite it
+    if state.get("language"):
+        updates["language"] = state.get("language")
+        print(f"[DEBUG] Intent node: Preserving language from state: {state.get('language')}")
+    
     # Don't set reply_text here - let reasoning_node handle it
     if parsed.get("crop"):
         updates["crop"] = parsed["crop"]
@@ -472,6 +587,17 @@ def reasoning_node(state: FarmState):
     has_image = bool(state.get("image_path"))
     has_audio = bool(state.get("audio_path"))
     
+    # CRITICAL: If language not set, detect from transcript
+    if not language or language not in ["bn", "en"]:
+        if transcript:
+            language = detect_language_from_text(transcript)
+            print(f"[DEBUG] Reasoning node: Language not in state, detected from transcript: {language}")
+        else:
+            language = "en"  # Default to English
+            print(f"[DEBUG] Reasoning node: No transcript, defaulting to English")
+    
+    print(f"[DEBUG] Reasoning node: Using language: {language} for response generation")
+    
     # Determine input type for better system instruction
     input_type = "text"
     if has_audio:
@@ -487,12 +613,12 @@ def reasoning_node(state: FarmState):
     
     # Enhanced system instruction based on input type
     if input_type == "voice":
-        system_instruction = """You are FarmAssist, an intelligent voice assistant for farmers in Bangladesh. 
+        system_instruction = """You are KrishiBondhu, an intelligent voice assistant for farmers in Bangladesh. 
 Your role is to help farmers with their agricultural questions and problems.
 
 KEY RESPONSIBILITIES:
 - Listen carefully to the farmer's voice query (transcribed text provided)
-- Provide clear, practical, and actionable farming advice
+- Provide clear, practical, and actionable farming advice based ONLY on what the farmer actually asked
 - CRITICALLY IMPORTANT: Respond in the EXACT SAME LANGUAGE as the farmer's query
   * If the farmer spoke in Bengali (বাংলা), you MUST respond ONLY in Bengali
   * If the farmer spoke in English, you MUST respond ONLY in English
@@ -503,6 +629,13 @@ KEY RESPONSIBILITIES:
 - Use simple, easy-to-understand language suitable for farmers
 - If an image is also provided, analyze it along with the voice query
 
+ACCURACY REQUIREMENTS:
+- Answer ONLY what the farmer asked - do NOT add information they didn't request
+- Do NOT make up or hallucinate information
+- If you're uncertain about something, say so clearly
+- Base your advice on the actual query, not assumptions
+- Do NOT invent crop names, diseases, or treatments that weren't mentioned
+
 RESPONSE GUIDELINES:
 - Keep responses concise but comprehensive (2-4 sentences for simple queries, up to 6 for complex issues)
 - Always provide actionable steps when possible
@@ -512,14 +645,14 @@ RESPONSE GUIDELINES:
 - ALWAYS match the language of your response to the language of the farmer's voice query"""
     
     elif input_type == "image_only" or input_type == "image_with_text":
-        system_instruction = """You are FarmAssist, an expert agricultural image analysis assistant for farmers in Bangladesh.
+        system_instruction = """You are KrishiBondhu, an expert agricultural image analysis assistant for farmers in Bangladesh.
 Your specialty is analyzing crop images to identify diseases, pests, nutrient deficiencies, and growth issues.
 
 KEY RESPONSIBILITIES:
 - Carefully examine the provided crop/plant image
-- Identify visible diseases, pests, nutrient deficiencies, or other issues
-- Provide specific, actionable treatment recommendations
-- Consider the crop type if mentioned or visible
+- Identify ONLY what you can actually see in the image - do NOT invent or assume
+- Provide specific, actionable treatment recommendations based on visible evidence
+- Consider the crop type if mentioned or clearly visible in the image
 - CRITICALLY IMPORTANT: Respond in the EXACT SAME LANGUAGE as the farmer's question (if provided)
   * If the farmer asked in Bengali (বাংলা), you MUST respond ONLY in Bengali
   * If the farmer asked in English, you MUST respond ONLY in English
@@ -527,9 +660,16 @@ KEY RESPONSIBILITIES:
   * Do NOT mix languages - use only the language the farmer used
 - Be precise about what you observe in the image
 
+ACCURACY REQUIREMENTS:
+- Describe ONLY what is visible in the image - do NOT make up details
+- If you cannot clearly identify a disease or pest, say so explicitly
+- Do NOT hallucinate or invent problems that aren't visible
+- Base your analysis on actual visual evidence, not assumptions
+- If the image quality is poor or unclear, mention this
+
 ANALYSIS GUIDELINES:
 - Describe what you see in the image (leaf color, spots, damage, growth stage, etc.)
-- Identify the specific problem (disease name, pest type, deficiency type)
+- Identify the specific problem ONLY if clearly visible (disease name, pest type, deficiency type)
 - Provide treatment steps (immediate actions and long-term solutions)
 - Suggest preventive measures
 - If uncertain, clearly state what you can see and recommend consulting an agricultural expert
@@ -537,11 +677,11 @@ ANALYSIS GUIDELINES:
 - ALWAYS match the language of your response to the language of the farmer's question"""
     
     else:  # text/chat
-        system_instruction = """You are FarmAssist, a knowledgeable and friendly chat assistant for farmers in Bangladesh.
+        system_instruction = """You are KrishiBondhu, a knowledgeable and friendly chat assistant for farmers in Bangladesh.
 You help farmers with agricultural questions, farming advice, and problem-solving through text conversation.
 
 KEY RESPONSIBILITIES:
-- Answer farming questions clearly and accurately
+- Answer farming questions clearly and accurately based ONLY on what was asked
 - Provide practical, actionable advice
 - Help with crop selection, planting, care, and harvesting
 - Assist with disease and pest management
@@ -551,6 +691,14 @@ KEY RESPONSIBILITIES:
   * If the farmer writes in English, you MUST respond in English
   * Do NOT mix languages - use only the language the farmer used
 - Be conversational, friendly, and supportive
+
+ACCURACY REQUIREMENTS:
+- Answer ONLY what the farmer asked - do NOT add information they didn't request
+- Do NOT make up or hallucinate information
+- If you're uncertain about something, say so clearly in the same language
+- Base your advice on the actual query, not assumptions
+- Do NOT invent crop names, diseases, or treatments that weren't mentioned
+- If the question is unclear, ask for clarification in the same language
 
 CONVERSATION GUIDELINES:
 - Maintain a helpful, patient, and encouraging tone
@@ -607,11 +755,50 @@ CONVERSATION GUIDELINES:
     if not language or language == "en":
         response_lang = "English"
     
-    # Add explicit language instruction to system instruction
+    # Add explicit language instruction to system instruction - STRONGER ENFORCEMENT
     if language == "bn":
-        language_instruction = "\n\nCRITICAL: You MUST respond ONLY in Bengali (বাংলা). Do NOT use English. Write your entire response in Bengali script."
+        language_instruction = f"""
+        
+🚨🚨🚨 CRITICAL LANGUAGE REQUIREMENT - MANDATORY 🚨🚨🚨
+The farmer's input is in Bengali (বাংলা). You MUST respond EXCLUSIVELY in Bengali script.
+
+ABSOLUTE REQUIREMENTS:
+- Write EVERY SINGLE word in Bengali script (বাংলা)
+- Do NOT use ANY English words, letters, or characters
+- Do NOT mix languages under ANY circumstances
+- If you need technical terms, transliterate them to Bengali or use Bengali equivalents
+- Your ENTIRE response from first word to last word must be in Bengali script
+- This is NOT optional - it is MANDATORY
+- Failure to respond in Bengali will cause the system to regenerate your response
+
+EXAMPLE OF CORRECT RESPONSE:
+"আপনার ধানের পাতায় যে সমস্যা দেখা যাচ্ছে, তা সম্ভবত পাতার দাগ রোগ। এই রোগের জন্য আপনি কীটনাশক ব্যবহার করতে পারেন।"
+
+EXAMPLE OF INCORRECT RESPONSE (DO NOT DO THIS):
+"Your rice leaves have a disease. You can use pesticide."  ❌ WRONG - This is English!
+
+Remember: The farmer asked in Bengali, so you MUST respond in Bengali ONLY."""
     else:
-        language_instruction = "\n\nCRITICAL: You MUST respond ONLY in English. Do NOT use Bengali."
+        language_instruction = f"""
+        
+🚨🚨🚨 CRITICAL LANGUAGE REQUIREMENT - MANDATORY 🚨🚨🚨
+The farmer's input is in English. You MUST respond EXCLUSIVELY in English.
+
+ABSOLUTE REQUIREMENTS:
+- Write EVERY SINGLE word in English
+- Do NOT use ANY Bengali words, script, or characters
+- Do NOT mix languages under ANY circumstances
+- Your ENTIRE response from first word to last word must be in English
+- This is NOT optional - it is MANDATORY
+- Failure to respond in English will cause the system to regenerate your response
+
+EXAMPLE OF CORRECT RESPONSE:
+"Your rice leaves show signs of leaf spot disease. You can use pesticides to treat this problem."
+
+EXAMPLE OF INCORRECT RESPONSE (DO NOT DO THIS):
+"আপনার ধানের পাতায় রোগ আছে।"  ❌ WRONG - This is Bengali!
+
+Remember: The farmer asked in English, so you MUST respond in English ONLY."""
     
     context = "\n".join(context_parts) if context_parts else "No additional context available."
     
@@ -756,7 +943,85 @@ The farmer's input language is: {response_lang}. You MUST respond in {response_l
         if not reply or reply.strip() == "":
             raise Exception("Empty reply from call_gemini_llm")
         
+        # Validate and enforce response language - regenerate if wrong language
+        actual_lang = detect_language_from_text(reply)
+        max_retries = 2
+        retry_count = 0
+        
+        while actual_lang != language and retry_count < max_retries:
+            print(f"[WARNING] Response language mismatch! Expected: {language}, Got: {actual_lang}")
+            print(f"[WARNING] Attempting to regenerate response (retry {retry_count + 1}/{max_retries})...")
+            
+            # Create a stronger prompt with explicit language correction
+            response_lang_name = "Bengali (বাংলা)" if language == "bn" else "English"
+            correction_prompt = f"""The previous response was in the wrong language. 
+
+ORIGINAL QUERY: {transcript if transcript else 'Image analysis request'}
+
+PREVIOUS RESPONSE (WRONG LANGUAGE): {reply[:200]}...
+
+CRITICAL: You MUST respond in {response_lang_name} ONLY. The previous response was in {actual_lang} which is incorrect.
+
+{language_instruction}
+
+Please regenerate your response in {response_lang_name} ONLY."""
+            
+            try:
+                if state.get("image_path") and os.path.exists(state["image_path"]):
+                    # For image requests, regenerate with image
+                    import mimetypes
+                    with open(state["image_path"], 'rb') as f:
+                        image_data = f.read()
+                    mime_type, _ = mimetypes.guess_type(state["image_path"])
+                    if not mime_type:
+                        mime_type = "image/jpeg"
+                    
+                    try:
+                        from google.generativeai.types import Part
+                        image_part = Part.from_data(data=image_data, mime_type=mime_type)
+                        try:
+                            model_with_system = genai.GenerativeModel(
+                                'models/gemini-2.5-flash',
+                                system_instruction=system_instruction
+                            )
+                        except:
+                            model_with_system = gemini_model
+                            correction_prompt = f"{system_instruction}\n\n{correction_prompt}"
+                        
+                        response = model_with_system.generate_content([image_part, correction_prompt])
+                        if hasattr(response, 'text') and response.text:
+                            reply = response.text.strip()
+                        elif hasattr(response, 'candidates') and response.candidates:
+                            candidate = response.candidates[0]
+                            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                                reply = ''.join([part.text for part in candidate.content.parts if hasattr(part, 'text')]).strip()
+                            elif hasattr(candidate, 'text'):
+                                reply = candidate.text.strip()
+                    except:
+                        reply = call_gemini_llm(correction_prompt, system_instruction)
+                else:
+                    reply = call_gemini_llm(correction_prompt, system_instruction)
+                
+                actual_lang = detect_language_from_text(reply)
+                retry_count += 1
+                
+                if actual_lang == language:
+                    print(f"[SUCCESS] Response regenerated successfully in correct language: {language}")
+                    break
+            except Exception as retry_err:
+                print(f"[ERROR] Failed to regenerate response: {retry_err}")
+                break
+        
+        # Final validation
+        final_lang = detect_language_from_text(reply)
+        if final_lang != language:
+            print(f"[ERROR] Response still in wrong language after {retry_count} retries. Expected: {language}, Got: {final_lang}")
+            print(f"[ERROR] Response preview: {reply[:300]}...")
+        else:
+            print(f"[SUCCESS] Response language validated: {language}")
+        
         print(f"[DEBUG] Response length: {len(reply)} characters")
+        print(f"[DEBUG] Final response language: {final_lang} (expected: {language})")
     except Exception as e:
         error_msg = str(e)
         error_type = type(e).__name__
@@ -783,30 +1048,60 @@ The farmer's input language is: {response_lang}. You MUST respond in {response_l
     if not reply or reply.strip() == "":
         reply = "I'm here to help with your farming questions. Please try asking again or provide more details about your crop or problem."
     
-    return {"reply_text": reply}
+    # CRITICAL: Return language in state so TTS node can use it
+    return {
+        "reply_text": reply,
+        "language": language  # Ensure language is preserved for TTS
+    }
 
 def tts_node(state: FarmState):
+    """
+    Text-to-speech node: generates audio from reply text.
+    Ensures correct language is used for TTS based on detected language or reply text.
+    """
     reply_text = state.get("reply_text", "")
     if not reply_text or reply_text.strip() == "":
+        print("[DEBUG] TTS node: No reply text, skipping TTS")
         return {}
-    lang = state.get("language", "bn")
-    # Ensure lang is a string and not None
+    
+    # Get language from state (detected from input)
+    lang = state.get("language", None)
+    
+    # If language not in state, detect from reply text
     if not lang or not isinstance(lang, str):
-        lang = "en"
+        print("[DEBUG] TTS node: Language not in state, detecting from reply text")
+        lang = detect_language_from_text(reply_text)
+        print(f"[DEBUG] TTS node: Detected language from reply: {lang}")
+    else:
+        print(f"[DEBUG] TTS node: Using language from state: {lang}")
+    
+    # Validate that reply text matches the detected language
+    reply_lang = detect_language_from_text(reply_text)
+    if reply_lang != lang:
+        print(f"[WARNING] TTS node: Language mismatch! State lang: {lang}, Reply lang: {reply_lang}")
+        print(f"[WARNING] TTS node: Using reply text language for TTS: {reply_lang}")
+        lang = reply_lang  # Use the actual language of the reply
+    
     # Map language codes for gTTS (gTTS uses 'bn' for Bengali, 'en' for English)
     lang_map = {"bn": "bn", "en": "en", "bn-BD": "bn", "en-US": "en", "en-GB": "en"}
-    tts_lang = lang_map.get(lang.lower(), "en")
+    tts_lang = lang_map.get(lang.lower() if lang else "en", "en")
+    
+    print(f"[DEBUG] TTS node: Generating TTS in language: {tts_lang}")
+    print(f"[DEBUG] TTS node: Reply text length: {len(reply_text)} characters")
+    
     try:
         path = synthesize_tts(reply_text, lang=tts_lang)
+        print(f"[DEBUG] TTS node: TTS generated successfully at: {path}")
         return {"tts_path": path}
     except Exception as e:
-        print(f"Error in TTS: {e}")
+        print(f"[ERROR] TTS generation failed: {e}")
         # Try with English as fallback
         try:
-            path = synthesize_tts(reply_text, lang="en")
+            print("[DEBUG] TTS node: Attempting fallback with English")
+            path = synthesize_tts(reply_text[:500], lang="en")  # Limit length for fallback
             return {"tts_path": path}
         except Exception as e2:
-            print(f"Error in TTS fallback: {e2}")
+            print(f"[ERROR] TTS fallback also failed: {e2}")
             return {}
 
 async def respond_node(state: FarmState):
