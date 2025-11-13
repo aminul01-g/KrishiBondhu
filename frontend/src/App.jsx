@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react'
 import Recorder from './components/Recorder'
-import ImageUpload from './components/ImageUpload'
 import CameraCapture from './components/CameraCapture'
 import Chatbot from './components/Chatbot'
 import ConversationHistory from './components/ConversationHistory'
@@ -43,10 +42,9 @@ export default function App() {
   }
 
   const tabs = [
-    { id: 'voice', label: '🎤 Voice', icon: '🎤' },
-    { id: 'image', label: '📷 Image', icon: '📷' },
-    { id: 'camera', label: '📹 Camera', icon: '📹' },
-    { id: 'chat', label: '💬 Chat', icon: '💬' }
+  { id: 'voice', label: '🎤 Voice', icon: '🎤' },
+  { id: 'camera', label: '📹 Camera', icon: '📹' },
+  { id: 'chat', label: '💬 Chat', icon: '💬' }
   ]
 
   return (
@@ -89,16 +87,7 @@ export default function App() {
                   </>
                 )}
 
-                {activeTab === 'image' && (
-                  <>
-                    <h2>📷 Image Analysis</h2>
-                    <p className="section-description">
-                      Upload an image of your crop problem. Our AI will analyze it and provide 
-                      solutions. You can also add a description.
-                    </p>
-                    <ImageUpload onUploadComplete={handleNewConversation} />
-                  </>
-                )}
+                {/* Image tab removed to avoid duplicate upload option while using chat */}
 
                 {activeTab === 'camera' && (
                   <>

@@ -280,54 +280,76 @@ def synthesize_tts(text: str, lang: str="bn") -> str:
     try:
         tts = gTTS(cleaned_text, lang=lang if lang else "en")
         tts.save(tts_path)
-        print(f"[DEBUG] TTS generated: {len(cleaned_text)} characters (cleaned from {len(text)} original)")
-        print(f"[DEBUG] TTS saved to: {tts_path}")
-        return tts_path
+        
+        # Verify file was actually created with retry logic (race condition fix)
+        import time
+        max_retries = 5
+        retry_count = 0
+        while retry_count < max_retries:
+            if os.path.exists(tts_path):
+                file_size = os.path.getsize(tts_path)
+                if file_size > 0:  # File has content
+                    print(f"[DEBUG] TTS generated: {len(cleaned_text)} characters (cleaned from {len(text)} original)")
+                    print(f"[DEBUG] TTS saved to: {tts_path} (file size: {file_size} bytes)")
+                    return tts_path
+            retry_count += 1
+            if retry_count < max_retries:
+                time.sleep(0.1)  # 100ms delay between retries
+        
+        # If we get here, file wasn't created properly
+        raise Exception(f"TTS file was not created at {tts_path} after {max_retries} retries")
     except Exception as e:
         print(f"[ERROR] TTS generation failed: {e}")
+        import traceback
+        traceback.print_exc()
         # Try with original text as fallback
         try:
             tts = gTTS(text[:500], lang=lang if lang else "en")  # Limit length
             tts.save(tts_path)
-            print(f"[DEBUG] TTS fallback saved to: {tts_path}")
-            return tts_path
+            
+            # Verify fallback file was created with retry logic
+            import time
+            max_retries = 5
+            retry_count = 0
+            while retry_count < max_retries:
+                if os.path.exists(tts_path):
+                    file_size = os.path.getsize(tts_path)
+                    if file_size > 0:  # File has content
+                        print(f"[DEBUG] TTS fallback saved to: {tts_path} (file size: {file_size} bytes)")
+                        return tts_path
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(0.1)
+            
+            raise Exception(f"TTS fallback file was not created at {tts_path} after {max_retries} retries")
         except Exception as e2:
             print(f"[ERROR] TTS fallback also failed: {e2}")
+            import traceback
+            traceback.print_exc()
             raise
 
 def call_gemini_llm(prompt: str, system_instruction: str = None) -> str:
     """
     Call Gemini LLM with a prompt and optional system instruction.
-    Uses Gemini's proper system_instruction parameter for better performance.
+    NOTE: Gemini 2.5 Flash SDK doesn't support system_instruction parameter in constructor,
+    so we embed system instructions directly into the prompt.
     """
     try:
         print(f"[DEBUG] call_gemini_llm called with system_instruction: {bool(system_instruction)}")
         print(f"[DEBUG] Prompt length: {len(prompt)} characters")
         
-        # Use Gemini's system_instruction parameter properly
+        # Since system_instruction parameter is not supported, embed it directly in prompt
         if system_instruction:
-            try:
-                # Create a new model instance with system instruction for better performance
-                print("[DEBUG] Creating model with system instruction...")
-                model_with_system = genai.GenerativeModel(
-                    'models/gemini-2.5-flash',
-                    system_instruction=system_instruction
-                )
-                print("[DEBUG] Generating content with system instruction...")
-                response = model_with_system.generate_content(prompt)
-                print("[DEBUG] Response received successfully")
-            except Exception as sys_err:
-                # If system_instruction fails, try without it (fallback)
-                print(f"[WARNING] System instruction failed: {sys_err}")
-                print("[DEBUG] Trying without system instruction as fallback...")
-                # Combine system instruction with prompt as fallback
-                fallback_prompt = f"{system_instruction}\n\n{prompt}"
-                response = gemini_model.generate_content(fallback_prompt)
-                print("[DEBUG] Fallback response received")
+            print("[DEBUG] Embedding system instruction directly in prompt...")
+            # Put system instruction at the very beginning of the prompt
+            final_prompt = f"{system_instruction}\n\n{prompt}"
         else:
-            print("[DEBUG] Generating content without system instruction...")
-            response = gemini_model.generate_content(prompt)
-            print("[DEBUG] Response received successfully")
+            print("[DEBUG] No system instruction provided, using prompt as-is...")
+            final_prompt = prompt
+        
+        print("[DEBUG] Generating content with Gemini...")
+        response = gemini_model.generate_content(final_prompt)
+        print("[DEBUG] Response received successfully")
         
         # Handle different response structures from Gemini
         if not response:
@@ -410,6 +432,10 @@ def detect_language_from_text(text: str) -> str:
     
     text = text.strip()
     
+    # DEBUG: Show what we're detecting
+    print(f"[DEBUG] detect_language_from_text: Input text length: {len(text)}")
+    print(f"[DEBUG] detect_language_from_text: First 50 chars: {repr(text[:50])}")
+    
     # Count Bengali vs English characters for more accurate detection
     bengali_char_count = 0
     english_char_count = 0
@@ -422,6 +448,8 @@ def detect_language_from_text(text: str) -> str:
         elif char.isalpha() and ord(char) < 128:
             english_char_count += 1
     
+    print(f"[DEBUG] detect_language_from_text: Bengali chars found: {bengali_char_count}, English chars: {english_char_count}")
+    
     # Check for common Bengali words/phrases (expanded list)
     bengali_indicators = [
         "আমি", "তুমি", "আপনি", "কী", "কেন", "কখন", "কোথায়", "কিভাবে", 
@@ -431,41 +459,51 @@ def detect_language_from_text(text: str) -> str:
     ]
     has_bengali_words = any(word in text for word in bengali_indicators)
     
+    print(f"[DEBUG] detect_language_from_text: Bengali words found: {has_bengali_words}")
+    
     # Decision logic: Bengali if we have Bengali characters OR Bengali words
     # Also consider ratio if both are present
     if bengali_char_count > 0:
         # If we have Bengali characters, it's definitely Bengali
-        print(f"[DEBUG] Detected Bengali language from text input (Bengali chars: {bengali_char_count})")
+        print(f"[DEBUG] ✅ DETECTED BENGALI: Bengali chars: {bengali_char_count}")
         return "bn"
     elif has_bengali_words:
         # Bengali words detected even without Bengali script (transliterated)
-        print(f"[DEBUG] Detected Bengali language from text input (Bengali words found)")
+        print(f"[DEBUG] ✅ DETECTED BENGALI: Bengali words found")
         return "bn"
     elif english_char_count > 0 and bengali_char_count == 0:
         # Only English characters
-        print(f"[DEBUG] Detected English language from text input (English chars: {english_char_count})")
+        print(f"[DEBUG] DETECTED ENGLISH: English chars: {english_char_count}, Bengali: 0")
         return "en"
     else:
         # Default to English if unclear
-        print(f"[DEBUG] Language unclear, defaulting to English")
+        print(f"[DEBUG] UNCLEAR: Defaulting to English")
         return "en"
 
 def stt_node(state: FarmState):
     """
     Speech-to-text node: handles both audio transcription and text input language detection.
     For text input, detects language. For audio input, transcribes and detects language.
+    ALWAYS returns language in the state.
     """
+    print(f"[DEBUG] STT node: Starting")
+    print(f"[DEBUG] STT node: Has transcript: {bool(state.get('transcript'))}")
+    print(f"[DEBUG] STT node: Has audio_path: {bool(state.get('audio_path'))}")
+    
     # If transcript already exists (from text input), detect language from it
     if state.get("transcript"):
+        transcript = state["transcript"]
+        print(f"[DEBUG] STT node: Transcript exists, length={len(transcript)}")
+        print(f"[DEBUG] STT node: Transcript repr: {repr(transcript[:100])}")
         # Detect language from the transcript text
-        detected_lang = detect_language_from_text(state["transcript"])
-        print(f"[DEBUG] STT node: Transcript exists, detected language: {detected_lang}")
-        print(f"[DEBUG] STT node: Transcript preview: {state['transcript'][:100]}...")
-        return {"transcript": state["transcript"], "language": detected_lang}
+        detected_lang = detect_language_from_text(transcript)
+        print(f"[DEBUG] STT node: 🔍 DETECTED LANGUAGE: {detected_lang} from text input")
+        print(f"[DEBUG] STT node: Full transcript: {transcript[:100]}...")
+        return {"transcript": transcript, "language": detected_lang}
     
-    # If no audio path, return empty (will skip to next node)
+    # If no audio path, still need to return a language (default to English)
     if not state.get("audio_path"):
-        print("[DEBUG] STT node: No audio path and no transcript, returning empty")
+        print("[DEBUG] STT node: No audio path and no transcript, defaulting to English")
         return {"transcript": "", "language": "en"}
     
     # Transcribe audio using Gemini
@@ -486,8 +524,16 @@ def intent_node(state: FarmState):
     """
     Ask Gemini to extract structured information from the transcript:
     crop, symptoms, need_image (bool). We use a small prompt and expect JSON back.
+    ALSO detects language from the transcript if not already detected (for text input).
     """
     transcript = state.get("transcript", "")
+    
+    # CRITICAL: Detect language if not already detected (for text input, since stt_node is skipped)
+    language = state.get("language", "en")
+    if transcript and (not language or language not in ["bn", "en"]):
+        language = detect_language_from_text(transcript)
+        print(f"[DEBUG] Intent node: Detected language from transcript: {language}")
+    
     if not transcript:
         # If no transcript, skip intent extraction and go to reasoning
         # Still add empty message to maintain flow
@@ -496,7 +542,8 @@ def intent_node(state: FarmState):
             existing_messages = [{"role":"user", "content": ""}]
         return {
             "messages": existing_messages,
-            "crop": None
+            "crop": None,
+            "language": language
         }
     
     system_instruction = """You are an information extraction assistant for KrishiBondhu.
@@ -545,12 +592,10 @@ IMPORTANT:
         parsed = {"crop": None, "symptoms": transcript, "need_image": False, "note": transcript}
     
     updates = {
-        "messages": state.get("messages", []) + [{"role":"user", "content": transcript}]
+        "messages": state.get("messages", []) + [{"role":"user", "content": transcript}],
+        "language": language  # ALWAYS set the detected language
     }
-    # Preserve language from state - don't overwrite it
-    if state.get("language"):
-        updates["language"] = state.get("language")
-        print(f"[DEBUG] Intent node: Preserving language from state: {state.get('language')}")
+    print(f"[DEBUG] Intent node: Setting language: {language}")
     
     # Don't set reply_text here - let reasoning_node handle it
     if parsed.get("crop"):
@@ -577,15 +622,26 @@ def reasoning_node(state: FarmState):
     """
     Use Gemini to generate an intelligent response integrating all available information:
     transcript, vision results, weather data, and crop information.
+    
+    CRITICAL: Each request is independently processed - no carryover from previous requests.
     """
-    transcript = state.get("transcript", "")
-    vision_result = state.get("vision_result", {})
-    weather_forecast = state.get("weather_forecast", {})
+    transcript = state.get("transcript", "").strip()
+    vision_result = state.get("vision_result", {}) or {}  # Ensure empty dict, not None
+    weather_forecast = state.get("weather_forecast", {}) or {}  # Ensure empty dict, not None
     crop = state.get("crop", "")
-    gps = state.get("gps", {})
+    gps = state.get("gps", {}) or {}  # Ensure empty dict
     language = state.get("language", "en")
     has_image = bool(state.get("image_path"))
     has_audio = bool(state.get("audio_path"))
+    
+    # CRITICAL DEBUG: Log incoming state to catch contamination
+    print(f"[DEBUG] ===== REASONING NODE START =====")
+    print(f"[DEBUG] Transcript: {transcript[:100] if transcript else '(empty)'}...")
+    print(f"[DEBUG] Crop detected: {crop if crop else '(none)'}")
+    print(f"[DEBUG] Vision result keys: {list(vision_result.keys()) if vision_result else '(empty)'}")
+    print(f"[DEBUG] Language: {language}")
+    print(f"[DEBUG] Has image: {has_image}, Has audio: {has_audio}")
+    print(f"[DEBUG] ===== END INCOMING STATE =====")
     
     # CRITICAL: If language not set, detect from transcript
     if not language or language not in ["bn", "en"]:
@@ -616,6 +672,13 @@ def reasoning_node(state: FarmState):
         system_instruction = """You are KrishiBondhu, an intelligent voice assistant for farmers in Bangladesh. 
 Your role is to help farmers with their agricultural questions and problems.
 
+🚨 CRITICAL - PROCESS ONLY CURRENT REQUEST 🚨
+- You are analyzing ONE farmer query in THIS conversation
+- Do NOT reference, assume, or carry over any information from previous conversations or uploads
+- Focus EXCLUSIVELY on the current question being asked
+- Ignore any crops, images, or context mentioned in previous requests
+- Answer ONLY what is asked in the current query
+
 KEY RESPONSIBILITIES:
 - Listen carefully to the farmer's voice query (transcribed text provided)
 - Provide clear, practical, and actionable farming advice based ONLY on what the farmer actually asked
@@ -635,6 +698,7 @@ ACCURACY REQUIREMENTS:
 - If you're uncertain about something, say so clearly
 - Base your advice on the actual query, not assumptions
 - Do NOT invent crop names, diseases, or treatments that weren't mentioned
+- Each image is a NEW request - do not assume it's the same crop from a previous query
 
 RESPONSE GUIDELINES:
 - Keep responses concise but comprehensive (2-4 sentences for simple queries, up to 6 for complex issues)
@@ -647,6 +711,14 @@ RESPONSE GUIDELINES:
     elif input_type == "image_only" or input_type == "image_with_text":
         system_instruction = """You are KrishiBondhu, an expert agricultural image analysis assistant for farmers in Bangladesh.
 Your specialty is analyzing crop images to identify diseases, pests, nutrient deficiencies, and growth issues.
+
+🚨 CRITICAL - PROCESS ONLY CURRENT IMAGE 🚨
+- You are analyzing ONE image in THIS request
+- Do NOT reference, assume, or carry over any information from previous image uploads
+- Do NOT assume this is the same crop as a previous image - each image is analyzed independently
+- Focus EXCLUSIVELY on what you see in the CURRENT image
+- Ignore any context from previous conversations
+- Analyze THIS image based on its own visual evidence ONLY
 
 KEY RESPONSIBILITIES:
 - Carefully examine the provided crop/plant image
@@ -666,6 +738,8 @@ ACCURACY REQUIREMENTS:
 - Do NOT hallucinate or invent problems that aren't visible
 - Base your analysis on actual visual evidence, not assumptions
 - If the image quality is poor or unclear, mention this
+- CRITICAL: Do not assume this is rice/wheat/any crop just because a previous image was that crop
+- Each image is a FRESH analysis - identify the actual crop visible in THIS image
 
 ANALYSIS GUIDELINES:
 - Describe what you see in the image (leaf color, spots, damage, growth stage, etc.)
@@ -680,8 +754,17 @@ ANALYSIS GUIDELINES:
         system_instruction = """You are KrishiBondhu, a knowledgeable and friendly chat assistant for farmers in Bangladesh.
 You help farmers with agricultural questions, farming advice, and problem-solving through text conversation.
 
+🚨 CRITICAL INSTRUCTIONS 🚨
+- You have access to BOTH the current message AND previous chat history (if available)
+- YOU SHOULD use chat history to provide CONTINUOUS, CONTEXT-AWARE assistance
+- Answer based on what the farmer is asking NOW, with full awareness of previous questions
+- IMPORTANT: Only use previous context IF it's directly relevant to the current question
+- If the current question asks about something different from before, treat it as a new topic
+- Each new image is a separate request - don't assume it's the same crop as a previous image
+
 KEY RESPONSIBILITIES:
-- Answer farming questions clearly and accurately based ONLY on what was asked
+- Answer farming questions clearly and accurately 
+- Remember and reference previous conversations when relevant to help the farmer
 - Provide practical, actionable advice
 - Help with crop selection, planting, care, and harvesting
 - Assist with disease and pest management
@@ -691,6 +774,16 @@ KEY RESPONSIBILITIES:
   * If the farmer writes in English, you MUST respond in English
   * Do NOT mix languages - use only the language the farmer used
 - Be conversational, friendly, and supportive
+- Show that you remember previous discussions when relevant
+
+USING CHAT HISTORY:
+- ✅ DO reference previous questions when the farmer is following up or asking related questions
+- ✅ DO remember crop information from earlier in the conversation
+- ✅ DO provide continuous support by referencing earlier solutions you've suggested
+- ✅ DO ask clarifying questions like "Is this the same rice crop we discussed earlier?"
+- ❌ DON'T assume context if the farmer asks about something completely different
+- ❌ DON'T reference images from previous messages unless explicitly asked
+- ❌ DON'T assume a disease diagnosis from earlier applies to a new image
 
 ACCURACY REQUIREMENTS:
 - Answer ONLY what the farmer asked - do NOT add information they didn't request
@@ -699,6 +792,7 @@ ACCURACY REQUIREMENTS:
 - Base your advice on the actual query, not assumptions
 - Do NOT invent crop names, diseases, or treatments that weren't mentioned
 - If the question is unclear, ask for clarification in the same language
+- If a question requires identifying a new crop, ask or verify with the farmer
 
 CONVERSATION GUIDELINES:
 - Maintain a helpful, patient, and encouraging tone
@@ -706,7 +800,8 @@ CONVERSATION GUIDELINES:
 - Provide step-by-step guidance for complex tasks
 - Reference local farming practices in Bangladesh when relevant
 - If an image is attached, analyze it along with the text query
-- ALWAYS match the language of your response to the language of the farmer's question"""
+- ALWAYS match the language of your response to the language of the farmer's question
+- Use the chat history to provide continuous, coherent support across multiple turns"""
     
     # Build comprehensive context for Gemini
     context_parts = []
@@ -755,74 +850,84 @@ CONVERSATION GUIDELINES:
     if not language or language == "en":
         response_lang = "English"
     
+    print(f"[DEBUG] Reasoning node: Response language selected: {response_lang} (code: {language})")
+    
     # Add explicit language instruction to system instruction - STRONGER ENFORCEMENT
     if language == "bn":
         language_instruction = f"""
-        
-🚨🚨🚨 CRITICAL LANGUAGE REQUIREMENT - MANDATORY 🚨🚨🚨
-The farmer's input is in Bengali (বাংলা). You MUST respond EXCLUSIVELY in Bengali script.
 
-ABSOLUTE REQUIREMENTS:
-- Write EVERY SINGLE word in Bengali script (বাংলা)
-- Do NOT use ANY English words, letters, or characters
-- Do NOT mix languages under ANY circumstances
-- If you need technical terms, transliterate them to Bengali or use Bengali equivalents
-- Your ENTIRE response from first word to last word must be in Bengali script
-- This is NOT optional - it is MANDATORY
-- Failure to respond in Bengali will cause the system to regenerate your response
+You MUST respond ONLY in Bengali (বাংলা). Every single word must be in Bengali script.
 
-EXAMPLE OF CORRECT RESPONSE:
-"আপনার ধানের পাতায় যে সমস্যা দেখা যাচ্ছে, তা সম্ভবত পাতার দাগ রোগ। এই রোগের জন্য আপনি কীটনাশক ব্যবহার করতে পারেন।"
+ABSOLUTE REQUIREMENTS FOR BENGALI RESPONSE:
+- Write response using ONLY Bengali script (বাংলা characters: অ আ ই ঈ উ ঊ ঋ এ ঐ ও ঔ ক খ গ ঘ ঙ চ ছ জ ঝ ঞ ট ঠ ড ঢ ণ ত থ দ ধ ন প ফ ব ভ ম য র ল শ ষ স হ)
+- Do NOT use ANY English words, numbers, or Latin characters
+- Each word must be in Bengali
+- Do NOT mix languages
 
-EXAMPLE OF INCORRECT RESPONSE (DO NOT DO THIS):
-"Your rice leaves have a disease. You can use pesticide."  ❌ WRONG - This is English!
+Example of CORRECT Bengali response:
+"আপনার ধানের পাতা হলুদ হওয়া সাধারণত পুষ্টির অভাব থেকে হয়। জিঙ্ক বা আয়রনের অভাব দেখা দেয় তখন পাতা হলুদ হয়ে যায়। আপনি ইউরিয়া সার প্রয়োগ করুন এবং সেচ প্রদান করুন।"
 
-Remember: The farmer asked in Bengali, so you MUST respond in Bengali ONLY."""
+WRONG examples you MUST NOT do:
+- "আপনার rice এর পাতা yellowing" ❌ (Has English words)
+- "আপনার শসার nitrogen deficiency আছে" ❌ (Has English)
+- "Your ধান has disease" ❌ (Mixed languages)
+
+Remember: The user asked in Bengali. You MUST respond ONLY in Bengali script, no exceptions."""
     else:
         language_instruction = f"""
-        
-🚨🚨🚨 CRITICAL LANGUAGE REQUIREMENT - MANDATORY 🚨🚨🚨
-The farmer's input is in English. You MUST respond EXCLUSIVELY in English.
 
-ABSOLUTE REQUIREMENTS:
-- Write EVERY SINGLE word in English
-- Do NOT use ANY Bengali words, script, or characters
-- Do NOT mix languages under ANY circumstances
-- Your ENTIRE response from first word to last word must be in English
-- This is NOT optional - it is MANDATORY
-- Failure to respond in English will cause the system to regenerate your response
+You MUST respond ONLY in English. Every single word must be in English.
 
-EXAMPLE OF CORRECT RESPONSE:
-"Your rice leaves show signs of leaf spot disease. You can use pesticides to treat this problem."
+ABSOLUTE REQUIREMENTS FOR ENGLISH RESPONSE:
+- Write response using ONLY English words and characters
+- Do NOT use ANY Bengali words or script
+- Each word must be in English
+- Do NOT mix languages
 
-EXAMPLE OF INCORRECT RESPONSE (DO NOT DO THIS):
-"আপনার ধানের পাতায় রোগ আছে।"  ❌ WRONG - This is Bengali!
+Example of CORRECT English response:
+"Your rice leaves turning yellow typically indicates nutrient deficiency. It could be lack of nitrogen, zinc, or iron. Apply urea fertilizer and provide adequate irrigation."
 
-Remember: The farmer asked in English, so you MUST respond in English ONLY."""
+WRONG examples you MUST NOT do:
+- "আপনার rice has disease" ❌ (Has Bengali)
+- "Your ধান needs আরো water" ❌ (Mixed)
+- "Rice রোগ detected" ❌ (Mixed)
+
+Remember: The user asked in English. You MUST respond ONLY in English, no exceptions."""
     
     context = "\n".join(context_parts) if context_parts else "No additional context available."
     
     # Build prompt based on input type with STRONG language enforcement
     if input_type == "image_only":
-        prompt = f"""Analyze the provided image and provide a comprehensive response to help the farmer.
+        prompt = f"""🚨 CRITICAL: Analyze ONLY the image provided in THIS request. Ignore any previous context.
 
-CONTEXT INFORMATION:
+Analyze the provided image and provide a comprehensive response to help the farmer.
+
+CURRENT REQUEST CONTEXT (This is all you should consider):
 {context}
+
+CONTEXT ISOLATION: Do NOT reference any previous images, crops, or conversations. This image is analyzed independently.
 
 Please:
 1. Describe what you see in the image (crop type, growth stage, visible issues)
-2. Identify any problems (diseases, pests, nutrient deficiencies, etc.)
+2. Identify any problems (diseases, pests, nutrient deficiencies, etc.) - ONLY based on what's visible
 3. Provide specific treatment recommendations
 4. Suggest preventive measures
 
 {language_instruction}
 The farmer's input language is: {response_lang}. You MUST respond in {response_lang}."""
+        
+        print(f"[DEBUG] Language in prompt for image_only: {response_lang}")
+        print(f"[DEBUG] Language instruction included in prompt")
     
     elif input_type == "image_with_text":
-        prompt = f"""The farmer has provided both an image and a question. Analyze the image in context of their question.
+        prompt = f"""🚨 CRITICAL: Analyze ONLY THIS image and question. Ignore any previous context, conversations, or images.
 
-CONTEXT INFORMATION:
+The farmer has provided both an image and a question. Analyze the image in context of their question.
+
+CURRENT REQUEST CONTEXT (This is all you should consider):
 {context}
+
+CONTEXT ISOLATION: Do NOT reference previous images, crops, or conversations. Each request is independent.
 
 Please:
 1. Address the farmer's specific question
@@ -832,12 +937,19 @@ Please:
 
 {language_instruction}
 The farmer's input language is: {response_lang}. You MUST respond in {response_lang}."""
+        
+        print(f"[DEBUG] Language in prompt for image_with_text: {response_lang}")
+        print(f"[DEBUG] Language instruction included in prompt")
     
     else:  # voice or text
-        prompt = f"""Based on the following information, provide a helpful and comprehensive response to the farmer.
+        prompt = f"""🚨 CRITICAL: Answer ONLY THIS question. Do NOT reference previous queries, conversations, or context.
 
-CONTEXT INFORMATION:
+Based on the following information, provide a helpful and comprehensive response to the farmer.
+
+CURRENT REQUEST CONTEXT (This is all you should consider):
 {context}
+
+CONTEXT ISOLATION: Each request is independent. Do NOT assume context from previous messages or uploads.
 
 Please provide:
 1. A direct answer to the farmer's question
@@ -847,6 +959,9 @@ Please provide:
 
 {language_instruction}
 The farmer's input language is: {response_lang}. You MUST respond in {response_lang}. If the farmer asked in Bengali, respond in Bengali. If they asked in English, respond in English."""
+        
+        print(f"[DEBUG] Language in prompt for text/voice: {response_lang}")
+        print(f"[DEBUG] Language instruction included in prompt")
     
     try:
         # If there's an image, include it for multimodal understanding
@@ -1091,17 +1206,36 @@ def tts_node(state: FarmState):
     
     try:
         path = synthesize_tts(reply_text, lang=tts_lang)
-        print(f"[DEBUG] TTS node: TTS generated successfully at: {path}")
+        
+        # Verify file exists before returning
+        if not os.path.exists(path):
+            print(f"[ERROR] TTS file was returned but doesn't exist: {path}")
+            raise Exception(f"TTS file not found at {path}")
+        
+        file_size = os.path.getsize(path)
+        print(f"[DEBUG] TTS node: TTS generated successfully at: {path} (size: {file_size} bytes)")
         return {"tts_path": path}
     except Exception as e:
         print(f"[ERROR] TTS generation failed: {e}")
+        import traceback
+        traceback.print_exc()
         # Try with English as fallback
         try:
             print("[DEBUG] TTS node: Attempting fallback with English")
             path = synthesize_tts(reply_text[:500], lang="en")  # Limit length for fallback
-            return {"tts_path": path}
+            
+            # Verify fallback file exists
+            if os.path.exists(path):
+                file_size = os.path.getsize(path)
+                print(f"[DEBUG] TTS node: Fallback TTS generated at: {path} (size: {file_size} bytes)")
+                return {"tts_path": path}
+            else:
+                print(f"[ERROR] TTS fallback file not found: {path}")
+                return {}
         except Exception as e2:
             print(f"[ERROR] TTS fallback also failed: {e2}")
+            import traceback
+            traceback.print_exc()
             return {}
 
 async def respond_node(state: FarmState):
